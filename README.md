@@ -17,8 +17,8 @@ The backend, built with asynchronous Python APIs, handles secure authentication,
   style="margin: 0 auto;">
 </div>
 
+
 The system supports persistent multi-session tutoring through a sidebar-based conversation manager, markdown-rendered messaging, and token-authenticated communication between the client and server. Users can log in, manage their past conversations, and engage in real-time learning conversations with the model. ALAASKA is a research project that can serves as a framework for researchers, educators, or developers building AI-powered adaptive learning tools with pedagogical constraints.  
-<br>
 
 ## Installation
 
