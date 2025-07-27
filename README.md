@@ -11,7 +11,7 @@ The backend, built with asynchronous Python APIs, handles secure authentication,
   <img
   src="https://github.com/Bonam-M/ALAASKA/blob/main/frontend/src/assets/alaaska-platform.png"
   alt="ALAASKA overview"
-  title="Optional title"
+  title="ALAASKA app overview"
   style="display: inline-block; margin: 0 auto; max-width: 200px">
 </div>
 
