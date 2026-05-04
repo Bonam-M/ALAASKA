@@ -10,6 +10,7 @@ from openai import AsyncOpenAI
 from datetime import datetime, timezone
 import uuid
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -48,18 +49,41 @@ def now_utc_iso():
     """Return current UTC time as ISO string for message timestamps"""
     return datetime.now(timezone.utc).isoformat()
 
-def create_message(role: str, content: str) -> dict:
+
+def parse_iso_timestamp(timestamp: str):
+    """Parse ISO timestamp safely for metadata calculations."""
+    if not timestamp:
+        return None
+    try:
+        return datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def lexical_richness(text: str) -> float:
+    """Simple type-token ratio used as a lightweight style marker."""
+    if not text:
+        return 0.0
+    words = re.findall(r"\b\w+\b", text.lower())
+    if not words:
+        return 0.0
+    return round(len(set(words)) / len(words), 4)
+
+def create_message(role: str, content: str, extra: dict = None) -> dict:
     """
     Create a message with ML analysis metadata.
     Includes timestamp, char_count, word_count for behavioral analysis.
     """
-    return {
+    msg = {
         "role": role,
         "content": content,
         "timestamp": now_utc_iso(),
         "char_count": len(content),
         "word_count": len(content.split()) if content else 0
     }
+    if extra:
+        msg.update(extra)
+    return msg
 
 
 # ========== GET ALL CONVERSATIONS ==========
@@ -276,7 +300,18 @@ async def chat(request: ChatRequest, auth: HTTPAuthorizationCredentials = Depend
 
     # Append user message (with metadata only for assignment chats)
     if is_assignment_chat:
-        messages.append(create_message("user", msg_text))
+        inter_turn_response_ms = None
+        if messages and messages[-1].get("role") == "assistant":
+            prev_assistant_ts = parse_iso_timestamp(messages[-1].get("timestamp"))
+            if prev_assistant_ts:
+                inter_turn_response_ms = int((now_utc() - prev_assistant_ts).total_seconds() * 1000)
+
+        user_turn_index = len([m for m in messages if m.get("role") == "user"]) + 1
+        messages.append(create_message("user", msg_text, {
+            "user_turn_index": user_turn_index,
+            "inter_turn_response_ms": inter_turn_response_ms,
+            "lexical_richness": lexical_richness(msg_text),
+        }))
     else:
         messages.append({"role": "user", "content": msg_text})
 
@@ -324,11 +359,15 @@ async def chat(request: ChatRequest, auth: HTTPAuthorizationCredentials = Depend
     selected_model = ASSIGNMENT_MODEL_ID if is_assignment_chat else MODEL_ID
     
     try:
-        resp = await client.chat.completions.create(
-            model=selected_model,
-            messages=messages_for_api,
-            temperature=0.7
-        )
+        # Some assignment models (e.g., gpt-5-mini) don't support temperature parameter
+        create_kwargs = {
+            "model": selected_model,
+            "messages": messages_for_api
+        }
+        if selected_model != ASSIGNMENT_MODEL_ID:  # Only add temperature for non-assignment models
+            create_kwargs["temperature"] = 0.7
+        
+        resp = await client.chat.completions.create(**create_kwargs)
         reply = resp.choices[0].message.content or ""
     except Exception as e:
         logger.error(f"OpenAI chat error for model {selected_model}: {e}")

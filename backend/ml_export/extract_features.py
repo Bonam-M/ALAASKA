@@ -149,6 +149,18 @@ def safe_std(values: List[float], default: float = 0.0) -> float:
     return statistics.stdev(values) if len(values) > 1 else default
 
 
+def calculate_trend_slope(values: List[float]) -> float:
+    """Calculate slope of a value series over index positions."""
+    if len(values) < 2:
+        return 0.0
+    x = np.arange(len(values), dtype=float)
+    y = np.array(values, dtype=float)
+    try:
+        return float(np.polyfit(x, y, 1)[0])
+    except Exception:
+        return 0.0
+
+
 def parse_timestamp(ts: str) -> Optional[datetime]:
     """Parse ISO timestamp string."""
     if not ts:
@@ -321,16 +333,53 @@ def extract_behavioral_features(telemetry_events: List[Dict]) -> Dict[str, Any]:
     
     # Chars per message from message_send
     chars_per_msg = []
+    input_lengths = []
+    question_mark_counts = []
+    sentence_counts = []
+    edit_pause_counts = []
+    first_key_to_send_times = []
+    focus_return_to_send_times = []
     for e in message_events:
         msg_data = e.get('message_send_data', {})
         keystrokes = msg_data.get('total_keystrokes', 0)
         pasted = msg_data.get('chars_pasted', 0)
         chars_per_msg.append(keystrokes + pasted)
+        input_lengths.append(msg_data.get('message_input_length_at_send', 0) or 0)
+        question_mark_counts.append(msg_data.get('message_question_mark_count', 0) or 0)
+        sentence_counts.append(msg_data.get('message_sentence_count', 0) or 0)
+        edit_pause_counts.append(msg_data.get('message_edit_pause_count', 0) or 0)
+
+        first_key_to_send = msg_data.get('message_first_key_to_send_ms')
+        if isinstance(first_key_to_send, (int, float)) and first_key_to_send >= 0:
+            first_key_to_send_times.append(first_key_to_send)
+
+        focus_return_to_send = msg_data.get('message_send_after_focus_return_ms')
+        if isinstance(focus_return_to_send, (int, float)) and focus_return_to_send >= 0:
+            focus_return_to_send_times.append(focus_return_to_send)
     
     total_chars_in_messages = sum(chars_per_msg)
+    total_input_chars = sum(input_lengths)
     features['composition_per_char_ms'] = safe_div(
         features['total_composition_time_ms'],
         total_chars_in_messages
+    )
+
+    # Message-level process and light text-structure features
+    features['avg_edit_pause_count_per_message'] = safe_mean(edit_pause_counts)
+    features['total_edit_pause_count'] = sum(edit_pause_counts)
+    features['first_key_to_send_avg_ms'] = safe_mean(first_key_to_send_times)
+    features['first_key_to_send_min_ms'] = min(first_key_to_send_times) if first_key_to_send_times else 0
+    features['focus_return_to_send_ms_avg'] = safe_mean(focus_return_to_send_times)
+    features['focus_return_to_send_ms_min'] = min(focus_return_to_send_times) if focus_return_to_send_times else 0
+    features['message_question_mark_total'] = sum(question_mark_counts)
+    features['question_mark_rate_per_100_chars'] = safe_div(
+        features['message_question_mark_total'] * 100,
+        total_input_chars
+    )
+    features['message_sentence_total'] = sum(sentence_counts)
+    features['sentence_density_per_message'] = safe_div(
+        features['message_sentence_total'],
+        len(message_events)
     )
     
     # Idle time
@@ -400,6 +449,17 @@ def extract_content_features(messages: List[Dict]) -> Dict[str, Any]:
     # Filter by role
     student_msgs = [m for m in messages if m.get('role') == 'user']
     ai_msgs = [m for m in messages if m.get('role') == 'assistant']
+
+    inter_turn_from_meta = [
+        m.get('inter_turn_response_ms')
+        for m in student_msgs
+        if isinstance(m.get('inter_turn_response_ms'), (int, float)) and m.get('inter_turn_response_ms') >= 0
+    ]
+    lexical_richness_from_meta = [
+        m.get('lexical_richness')
+        for m in student_msgs
+        if isinstance(m.get('lexical_richness'), (int, float))
+    ]
     
     # Get all student text
     student_texts = [m.get('content', '') for m in student_msgs]
@@ -452,6 +512,8 @@ def extract_content_features(messages: List[Dict]) -> Dict[str, Any]:
     features['avg_response_time_ms'] = safe_mean(response_times)
     features['min_response_time_ms'] = min(response_times) if response_times else 0
     features['response_time_variance'] = safe_std(response_times)
+    features['user_response_time_trend_slope'] = calculate_trend_slope(response_times)
+    features['avg_inter_turn_response_ms_from_meta'] = safe_mean(inter_turn_from_meta)
     
     # Fast long responses (suspicious pattern)
     fast_long_count = 0
@@ -492,6 +554,7 @@ def extract_content_features(messages: List[Dict]) -> Dict[str, Any]:
     # VOCABULARY FEATURES
     # ─────────────────────────────────────────────────────────────────────────
     features['vocabulary_richness'] = calculate_vocabulary_richness(all_student_text)
+    features['avg_message_lexical_richness'] = safe_mean(lexical_richness_from_meta)
     features['avg_word_length'] = calculate_avg_word_length(all_student_text)
     features['avg_sentence_length'] = calculate_avg_sentence_length(all_student_text)
     
@@ -603,6 +666,19 @@ def build_feature_matrix(data: Dict[str, Any]) -> pd.DataFrame:
             rows.append(row)
     
     df = pd.DataFrame(rows)
+
+    if not df.empty:
+        # Relative lexical shift against each student-assignment baseline.
+        # Uses simple normalized distance for robust behavior on small samples.
+        baseline_vr = df.groupby(['student_email', 'assignment_id'])['vocabulary_richness'].transform('mean')
+        baseline_awl = df.groupby(['student_email', 'assignment_id'])['avg_word_length'].transform('mean')
+
+        vr_delta = (df['vocabulary_richness'] - baseline_vr).abs()
+        awl_delta = (df['avg_word_length'] - baseline_awl).abs()
+        df['lexical_shift_score'] = vr_delta + (awl_delta / baseline_awl.clip(lower=1.0))
+    else:
+        df['lexical_shift_score'] = []
+
     print(f"\n  ✓ Extracted features for {len(df)} submissions")
     
     return df
@@ -620,6 +696,11 @@ def generate_feature_metadata(df: pd.DataFrame) -> Dict[str, Any]:
         'total_composition_time_ms', 'avg_composition_time_ms',
         'min_composition_time_ms', 'max_composition_time_ms',
         'composition_per_char_ms', 'total_idle_time_ms',
+        'avg_edit_pause_count_per_message', 'total_edit_pause_count',
+        'first_key_to_send_avg_ms', 'first_key_to_send_min_ms',
+        'focus_return_to_send_ms_avg', 'focus_return_to_send_ms_min',
+        'message_question_mark_total', 'question_mark_rate_per_100_chars',
+        'message_sentence_total', 'sentence_density_per_message',
         'focus_loss_count', 'total_time_away_ms', 'avg_time_away_ms',
         'focus_loss_before_submit', 'session_duration_ms', 'events_per_minute',
         'message_count', 'telemetry_event_count',
@@ -631,13 +712,14 @@ def generate_feature_metadata(df: pd.DataFrame) -> Dict[str, Any]:
         'first_message_length', 'avg_message_length', 'max_message_length',
         'message_length_std', 'total_student_chars', 'message_length_growth',
         'avg_response_time_ms', 'min_response_time_ms', 'response_time_variance',
+        'user_response_time_trend_slope', 'avg_inter_turn_response_ms_from_meta',
         'fast_long_response_count',
         'question_count',
         'bullet_point_ratio', 'formal_phrase_count', 'hedging_phrase_count',
         'ai_artifact_count', 'ai_punctuation_count',
         'emdash_ratio', 'semicolon_ratio', 'latex_formula_count',
-        'vocabulary_richness', 'avg_word_length', 'avg_sentence_length',
-        'formal_language_score',
+        'vocabulary_richness', 'avg_message_lexical_richness', 'avg_word_length', 'avg_sentence_length',
+        'formal_language_score', 'lexical_shift_score',
     ]
     
     metadata = {

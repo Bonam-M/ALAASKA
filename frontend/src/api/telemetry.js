@@ -13,6 +13,8 @@
 
 import api from './axios';
 
+const PAUSE_THRESHOLD_MS = 2000;
+
 // Simple hash function for content fingerprinting (no external dependency)
 const simpleHash = (str) => {
   let hash = 0;
@@ -50,11 +52,14 @@ const telemetryState = {
   
   // Message composition tracking
   messageStartTime: null,
+  messageFirstKeypressTime: null,
   messageKeystrokes: 0,
   messageBackspaces: 0,
   messagePasteCount: 0,
   messageCharsPasted: 0,
   messageFocusLosses: 0,
+  messageEditPauseCount: 0,
+  lastFocusGainTime: null,
   
   // Batch queue
   eventQueue: [],
@@ -97,11 +102,14 @@ export const cleanupTelemetry = () => {
  */
 const resetMessageCounters = () => {
   telemetryState.messageStartTime = Date.now();
+  telemetryState.messageFirstKeypressTime = null;
   telemetryState.messageKeystrokes = 0;
   telemetryState.messageBackspaces = 0;
   telemetryState.messagePasteCount = 0;
   telemetryState.messageCharsPasted = 0;
   telemetryState.messageFocusLosses = 0;
+  telemetryState.messageEditPauseCount = 0;
+  telemetryState.lastFocusGainTime = null;
   telemetryState.keyCount = 0;
   telemetryState.backspaceCount = 0;
   telemetryState.typingStartTime = null;
@@ -204,14 +212,18 @@ export const handleKeyDown = (e) => {
   // Track idle time (time since last keystroke)
   if (telemetryState.lastKeystrokeTime) {
     const timeSinceLastKey = now - telemetryState.lastKeystrokeTime;
-    if (timeSinceLastKey > 2000) { // More than 2 seconds = idle
+    if (timeSinceLastKey > PAUSE_THRESHOLD_MS) { // More than threshold = idle/edit pause
       telemetryState.idleTime += timeSinceLastKey;
+      telemetryState.messageEditPauseCount++;
     }
   }
   
   // Start typing timer if not started
   if (!telemetryState.typingStartTime) {
     telemetryState.typingStartTime = now;
+  }
+  if (!telemetryState.messageFirstKeypressTime) {
+    telemetryState.messageFirstKeypressTime = now;
   }
   
   telemetryState.lastKeystrokeTime = now;
@@ -283,6 +295,8 @@ export const handleFocusLoss = () => {
  */
 export const handleFocusGain = () => {
   if (!telemetryState.chatId) return;
+
+  telemetryState.lastFocusGainTime = Date.now();
   
   let durationAway = null;
   if (telemetryState.focusLostTime) {
@@ -310,15 +324,29 @@ export const handleFocusGain = () => {
 /**
  * Handle message send - captures full composition metrics
  */
-export const handleMessageSend = () => {
+export const handleMessageSend = (inputText = '') => {
   if (!telemetryState.chatId) return;
   
   // First, flush any remaining keystroke data
   sendKeystrokeBatch();
   
+  const now = Date.now();
   const compositionTime = telemetryState.messageStartTime
-    ? Date.now() - telemetryState.messageStartTime
+    ? now - telemetryState.messageStartTime
     : 0;
+  const firstKeyToSendMs = telemetryState.messageFirstKeypressTime
+    ? now - telemetryState.messageFirstKeypressTime
+    : null;
+  const focusReturnToSendMs = telemetryState.lastFocusGainTime
+    ? now - telemetryState.lastFocusGainTime
+    : null;
+  const inputLength = inputText.length;
+  const questionMarkCount = (inputText.match(/\?/g) || []).length;
+  const sentenceCount = inputText
+    .split(/[.!?]+/)
+    .map(s => s.trim())
+    .filter(Boolean)
+    .length;
   
   const event = {
     ...createBaseEvent('MESSAGE_SEND'),
@@ -329,6 +357,12 @@ export const handleMessageSend = () => {
       paste_count: telemetryState.messagePasteCount,
       chars_pasted: telemetryState.messageCharsPasted,
       focus_losses: telemetryState.messageFocusLosses,
+      message_edit_pause_count: telemetryState.messageEditPauseCount,
+      message_first_key_to_send_ms: firstKeyToSendMs,
+      message_input_length_at_send: inputLength,
+      message_send_after_focus_return_ms: focusReturnToSendMs,
+      message_question_mark_count: questionMarkCount,
+      message_sentence_count: sentenceCount,
     },
   };
   

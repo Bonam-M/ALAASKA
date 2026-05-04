@@ -151,7 +151,7 @@ export default function ChatInterface({ chatId, messages, input, setInput, sendM
   const handleSendWithTelemetry = () => {
     if (input.trim()) {
       if (chatId) {
-        handleMessageSend(); // Record telemetry before sending
+        handleMessageSend(input); // Record telemetry before sending
       }
       sendMessage();
     }

@@ -320,6 +320,7 @@ def save_exports(
     
     # Save metadata
     metadata = {
+        "export_schema_version": "2.0.0",
         "export_timestamp": datetime.now(timezone.utc).isoformat(),
         "filter": filter_info,
         "counts": {

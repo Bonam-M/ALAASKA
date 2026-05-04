@@ -57,6 +57,12 @@ class MessageSendData(BaseModel):
     paste_count: int = Field(default=0, ge=0, description="Number of paste events during composition")
     chars_pasted: int = Field(default=0, ge=0, description="Total characters pasted")
     focus_losses: int = Field(default=0, ge=0, description="Times user left tab during composition")
+    message_edit_pause_count: int = Field(default=0, ge=0, description="Number of edit pauses above threshold")
+    message_first_key_to_send_ms: Optional[int] = Field(default=None, ge=0, description="Time from first keypress to send (ms)")
+    message_input_length_at_send: int = Field(default=0, ge=0, description="Input length at send time (chars)")
+    message_send_after_focus_return_ms: Optional[int] = Field(default=None, ge=0, description="Time from latest focus gain to send (ms)")
+    message_question_mark_count: int = Field(default=0, ge=0, description="Number of question marks in submitted input")
+    message_sentence_count: int = Field(default=0, ge=0, description="Estimated sentence count in submitted input")
 
 
 class TelemetryEvent(BaseModel):
